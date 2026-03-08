@@ -36,7 +36,8 @@
       "main.js",
       "preload.js",
       "src/**/*",
-      "assets/**/*"
+      "assets/**/*",
+      "patches/**/*"
     ],
     "extraResources": []
   },

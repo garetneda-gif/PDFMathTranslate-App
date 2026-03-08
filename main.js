@@ -64,7 +64,7 @@ function findPdf2zh() {
   return 'pdf2zh'; // fallback to bare name
 }
 
-const pdf2zhBin = findPdf2zh();
+let pdf2zhBin = findPdf2zh();
 
 // Get total page count of a PDF using Python/pypdf
 function getPdfPageCount(filePath) {
@@ -246,7 +246,7 @@ ipcMain.handle('check-pdf2zh-update', async () => {
 });
 
 ipcMain.handle('update-pdf2zh', async () => {
-  return new Promise((resolve) => {
+  const upgradeResult = await new Promise((resolve) => {
     const proc = spawn(pipBin, ['install', '--upgrade', 'pdf2zh-next'], {
       env: process.env,
       shell: false,
@@ -269,6 +269,27 @@ ipcMain.handle('update-pdf2zh', async () => {
       resolve({ success: false, error: err.message });
     });
   });
+
+  // Re-apply CoreML patch after upgrade (pip overwrites patched files)
+  if (upgradeResult.success) {
+    const home = os.homedir();
+    const venvPython = path.join(home, '.pdf2zh-venv/bin/python');
+    const patchScript = path.join(__dirname, 'patches', 'apply_coreml.py');
+    try {
+      await new Promise((resolve, reject) => {
+        const proc = spawn(venvPython, [patchScript], { env: process.env, shell: false });
+        proc.stdout.on('data', (d) => mainWindow?.webContents.send('translation-log', d.toString()));
+        proc.stderr.on('data', (d) => mainWindow?.webContents.send('translation-log', d.toString()));
+        proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`exit ${code}`)));
+        proc.on('error', reject);
+      });
+      mainWindow?.webContents.send('translation-log', '✓ CoreML GPU 加速补丁已重新应用\n');
+    } catch {
+      mainWindow?.webContents.send('translation-log', '⚠ CoreML 补丁重新应用失败（不影响基本功能）\n');
+    }
+  }
+
+  return upgradeResult;
 });
 
 // ==================== Environment Setup ====================
@@ -400,6 +421,20 @@ ipcMain.handle('setup-environment', async () => {
     log('\n[3/3] 安装 pdf2zh-next + pypdf（约需 3–10 分钟）...\n');
     setStep(3);
     await pipInstallWithFallback(['pdf2zh-next', 'pypdf']);
+
+    // Apply CoreML GPU acceleration patch to babeldoc
+    log('\n正在应用 CoreML GPU 加速补丁...\n');
+    const patchScript = path.join(__dirname, 'patches', 'apply_coreml.py');
+    const venvPython = path.join(venvPath, 'bin/python');
+    try {
+      await runStep(venvPython, [patchScript]);
+    } catch (e) {
+      log(`⚠ CoreML 补丁应用失败（不影响基本功能）: ${e.message}\n`);
+    }
+
+    // Refresh pdf2zh binary path now that venv exists
+    pdf2zhBin = findPdf2zh();
+
     log('\n✅ 安装完成！即将启动...\n');
 
     return { success: true };
