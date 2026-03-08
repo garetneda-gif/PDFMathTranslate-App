@@ -29,6 +29,9 @@ if "CoreMLExecutionProvider" in src:
     print("SKIP: CoreML patch already present")
     sys.exit(0)
 
+original_src = src
+patch_count = 0
+
 # --- Patch 1: Add _FIXED_IMGSZ class variable ---
 # Handle both formats: with or without blank line after class declaration
 if "class OnnxModel(DocLayoutModel):\n\n    def __init__" in src:
@@ -38,22 +41,43 @@ if "class OnnxModel(DocLayoutModel):\n\n    def __init__" in src:
         "    _FIXED_IMGSZ = 1024  # fixed input size for static-shape CoreML\n\n"
         "    def __init__",
     )
-else:
+elif "class OnnxModel(DocLayoutModel):\n    def __init__" in src:
     src = src.replace(
         "class OnnxModel(DocLayoutModel):\n    def __init__",
         "class OnnxModel(DocLayoutModel):\n"
         "    _FIXED_IMGSZ = 1024  # fixed input size for static-shape CoreML\n\n"
         "    def __init__",
     )
+if "_FIXED_IMGSZ" in src:
+    patch_count += 1
+    print("  Patch 1/4 OK: _FIXED_IMGSZ class variable")
+else:
+    print("  Patch 1/4 FAIL: could not insert _FIXED_IMGSZ")
 
 # --- Patch 2: Replace CPU-only provider selection with CoreML-aware logic ---
-OLD_PROVIDERS = """\
+# Try multiple known formats of the provider selection block
+PROVIDER_PATTERNS = [
+    # Format A: with comment lines about dml/cuda
+    """\
         for provider in available_providers:
             # disable dml|cuda|
             # directml/cuda may encounter problems under special circumstances
             if re.match(r"cpu", provider, re.IGNORECASE):
                 logger.info(f"Available Provider: {provider}")
-                providers.append(provider)"""
+                providers.append(provider)""",
+    # Format B: without comment lines
+    """\
+        for provider in available_providers:
+            if re.match(r"cpu", provider, re.IGNORECASE):
+                logger.info(f"Available Provider: {provider}")
+                providers.append(provider)""",
+    # Format C: with 'CPU' (capitalized)
+    """\
+        for provider in available_providers:
+            if re.match(r"CPU", provider, re.IGNORECASE):
+                logger.info(f"Available Provider: {provider}")
+                providers.append(provider)""",
+]
 
 NEW_PROVIDERS = """\
         use_coreml = os_name == "Darwin" and any(
@@ -77,7 +101,24 @@ NEW_PROVIDERS = """\
                     logger.info(f"Available Provider: {provider}")
                     providers.append(provider)"""
 
-src = src.replace(OLD_PROVIDERS, NEW_PROVIDERS)
+provider_patched = False
+for pattern in PROVIDER_PATTERNS:
+    if pattern in src:
+        src = src.replace(pattern, NEW_PROVIDERS)
+        provider_patched = True
+        break
+
+if provider_patched:
+    patch_count += 1
+    print("  Patch 2/4 OK: CoreML provider selection")
+else:
+    print("  Patch 2/4 FAIL: provider selection pattern not found")
+    # Print what's actually there for debugging
+    import re as _re
+    m = _re.search(r"(for provider in available_providers.*?providers\.append\(provider\))",
+                   src, _re.DOTALL)
+    if m:
+        print(f"  Found block:\n{m.group(0)[:200]}")
 
 # --- Patch 3: Insert _make_static_model before from_pretrained ---
 MAKE_STATIC = """\
@@ -102,22 +143,77 @@ MAKE_STATIC = """\
     @staticmethod
     def from_pretrained"""
 
-src = src.replace(
-    "    @staticmethod\n    def from_pretrained",
-    MAKE_STATIC,
-)
+if "    @staticmethod\n    def from_pretrained" in src and "_make_static_model" not in src:
+    src = src.replace(
+        "    @staticmethod\n    def from_pretrained",
+        MAKE_STATIC,
+    )
+
+if "_make_static_model" in src:
+    patch_count += 1
+    print("  Patch 3/4 OK: _make_static_model method")
+else:
+    print("  Patch 3/4 FAIL: could not insert _make_static_model")
 
 # --- Patch 4: Full-size padding instead of stride-aligned ---
-src = src.replace(
-    "        # Calculate padding size and align to stride multiple\n"
-    "        pad_w = (new_w - resized_w) % self.stride\n"
-    "        pad_h = (new_h - resized_h) % self.stride",
+# Try multiple known formats
+PADDING_PATTERNS = [
+    (
+        "        # Calculate padding size and align to stride multiple\n"
+        "        pad_w = (new_w - resized_w) % self.stride\n"
+        "        pad_h = (new_h - resized_h) % self.stride"
+    ),
+    (
+        "        pad_w = (new_w - resized_w) % self.stride\n"
+        "        pad_h = (new_h - resized_h) % self.stride"
+    ),
+]
+NEW_PADDING = (
     "        # Pad to full target size (enables static-shape CoreML acceleration)\n"
     "        pad_w = new_w - resized_w\n"
-    "        pad_h = new_h - resized_h",
+    "        pad_h = new_h - resized_h"
 )
 
-with open(target, "w") as f:
-    f.write(src)
+padding_patched = False
+for pattern in PADDING_PATTERNS:
+    if pattern in src:
+        src = src.replace(pattern, NEW_PADDING)
+        padding_patched = True
+        break
 
-print("OK: CoreML GPU acceleration patch applied")
+if padding_patched:
+    patch_count += 1
+    print("  Patch 4/4 OK: full-size padding")
+elif "pad_w = new_w - resized_w" in src:
+    patch_count += 1
+    print("  Patch 4/4 OK: full-size padding (already present)")
+else:
+    print("  Patch 4/4 FAIL: padding pattern not found")
+
+# --- Write patched file ---
+if src != original_src:
+    with open(target, "w") as f:
+        f.write(src)
+
+# --- Clear .pyc cache so Python picks up the patched source ---
+pycache_dir = os.path.join(os.path.dirname(target), "__pycache__")
+if os.path.isdir(pycache_dir):
+    cleared = 0
+    for fname in os.listdir(pycache_dir):
+        if fname.startswith("doclayout.") and fname.endswith((".pyc", ".pyo")):
+            try:
+                os.remove(os.path.join(pycache_dir, fname))
+                cleared += 1
+            except OSError:
+                pass
+    if cleared:
+        print(f"  Cleared {cleared} .pyc cache file(s)")
+
+if patch_count == 4:
+    print(f"OK: All 4 patches applied to {target}")
+elif patch_count > 0:
+    print(f"PARTIAL: {patch_count}/4 patches applied to {target}")
+    sys.exit(1)
+else:
+    print(f"FAIL: No patches could be applied to {target}")
+    sys.exit(1)

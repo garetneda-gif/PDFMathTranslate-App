@@ -192,10 +192,23 @@ app.whenReady().then(async () => {
   if (fs.existsSync(venvPython) && fs.existsSync(patchSrc)) {
     try {
       const patchScript = extractFromAsar(patchSrc);
-      const proc = spawn(venvPython, [patchScript], { env: process.env, shell: false });
-      proc.on('close', () => {});
-      proc.on('error', () => {});
-    } catch {}
+      await new Promise((resolve) => {
+        const proc = spawn(venvPython, [patchScript], { env: process.env, shell: false });
+        let output = '';
+        proc.stdout.on('data', (d) => (output += d.toString()));
+        proc.stderr.on('data', (d) => (output += d.toString()));
+        proc.on('close', (code) => {
+          console.log(`[CoreML patch] exit=${code} ${output.trim()}`);
+          resolve();
+        });
+        proc.on('error', (err) => {
+          console.log(`[CoreML patch] error: ${err.message}`);
+          resolve();
+        });
+      });
+    } catch (e) {
+      console.log(`[CoreML patch] failed: ${e.message}`);
+    }
   }
 });
 
@@ -574,23 +587,37 @@ ipcMain.handle('start-translation', async (event, options) => {
     return args;
   }
 
+  // Resolve wrapper script path (works both in dev and inside asar)
+  const wrapperScript = (() => {
+    const src = path.join(__dirname, 'patches', 'translate_wrapper.py');
+    return fs.existsSync(src) ? extractFromAsar(src) : null;
+  })();
+  const venvPython = path.join(os.homedir(), '.pdf2zh-venv/bin/python');
+  const useWrapper = wrapperScript && fs.existsSync(venvPython);
+
   // Spawn a single pdf2zh process.
   // batchProgressBase (0-100): progress offset for this batch
   // batchProgressScale (0-1): fraction of total progress this batch represents
   function spawnPdf2zh(args, startTime, filePath, completedFiles, totalFiles, batchProgressBase, batchProgressScale, batchContext = {}) {
     return new Promise((resolve, reject) => {
-      const proc = spawn(pdf2zhBin, args, { env: procEnv, shell: false });
+      // Use wrapper script for reliable JSON progress, fall back to pdf2zh CLI
+      let proc;
+      if (useWrapper) {
+        proc = spawn(venvPython, [wrapperScript, ...args], { env: procEnv, shell: false });
+      } else {
+        proc = spawn(pdf2zhBin, args, { env: procEnv, shell: false });
+      }
       translationProcess = proc;
 
       let currentStage = null;
       let lastProgress = 0;
-      let incompleteLine = ''; // buffer for pipe line splitting
+      let stdoutBuffer = ''; // buffer for JSON line splitting on stdout
 
       function sendProgress(data) {
         mainWindow?.webContents.send('translation-progress', { ...data, ...batchContext });
       }
 
-      // Normalize tqdm stage names to canonical names used in renderer
+      // Normalize stage names to canonical names used in renderer
       const stageNameNormalize = {
         'Parse PDF and Create Intermediate Representation': 'Parse PDF and Create IR',
       };
@@ -598,42 +625,24 @@ ipcMain.handle('start-translation', async (event, options) => {
         return name ? (stageNameNormalize[name] || name) : name;
       }
 
-      // Tick elapsed time every 2s; also flush any buffered tqdm line
+      // Tick elapsed time every 2s
       const elapsedTimer = setInterval(() => {
         const elapsed = Math.round((Date.now() - startTime) / 1000);
         mainWindow?.webContents.send('translation-tick', {
           elapsedSeconds: elapsed,
           stageName: currentStage,
         });
-        // Flush incompleteLine periodically — tqdm uses \r (not \n) in pipe mode,
-        // so the latest progress update may sit in the buffer indefinitely
-        if (incompleteLine) {
-          parseLine(incompleteLine);
-          incompleteLine = '';
-        }
       }, 2000);
 
-      // tqdm output format (pipe mode, uses \r as separator):
-      //   "translate:  14%|█▍        | 14.11/100 [00:10<01:04,  1.32it/s]"
-      //   "Parse Page Layout (2/2):  31%|███       | 30.59/100 [00:11<00:16,  4.32it/s]"
-      //   "Translate Paragraphs (Complete):  85%|████▌ | 85.46/100 [00:18<00:01,  8.32it/s]"
-      const tqdmOverallRegex = /^translate:\s+(\d+(?:\.\d+)?)%/;
-      const tqdmStageRegex = /^(.+?)\s+\((\d+)\/(\d+)\):\s+(\d+(?:\.\d+)?)%/;
-      const tqdmCompleteRegex = /^(.+?)\s+\(Complete\):\s+(\d+(?:\.\d+)?)%/;
+      // --- JSON progress event handler (wrapper mode) ---
+      function handleJsonEvent(event) {
+        const type = event.type;
+        const elapsed = (Date.now() - startTime) / 1000;
 
-      function parseLine(line) {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-
-        // 1. tqdm stage with (cur/total): "Parse Page Layout (2/2):  31%|..."
-        const sm = tqdmStageRegex.exec(trimmed);
-        if (sm) {
-          const stageName = normalizeStage(sm[1].trim());
-          const stageCur = parseInt(sm[2]);
-          const stageTotal = parseInt(sm[3]);
-          const rawPct = Math.min(parseFloat(sm[4]), 100);
+        if (type === 'progress_start' || type === 'progress_update' || type === 'progress_end') {
+          const stageName = normalizeStage(event.stage);
+          const rawPct = Math.min(event.overall_progress || 0, 100);
           const scaledPct = Math.round(batchProgressBase + rawPct * batchProgressScale);
-          const elapsed = (Date.now() - startTime) / 1000;
           const eta = rawPct > 1 ? Math.round(elapsed * (100 - rawPct) / rawPct) : null;
           currentStage = stageName;
           lastProgress = rawPct;
@@ -641,81 +650,57 @@ ipcMain.handle('start-translation', async (event, options) => {
             progress: scaledPct,
             currentFile: path.basename(filePath),
             completedFiles, totalFiles,
-            stageName, stageCur, stageTotal,
+            stageName,
+            stageCur: event.part_index || null,
+            stageTotal: event.total_parts || null,
             etaSeconds: eta,
             elapsedSeconds: Math.round(elapsed),
           });
-          return;
-        }
-
-        // 2. tqdm stage (Complete): "Translate Paragraphs (Complete):  85%|..."
-        const cm = tqdmCompleteRegex.exec(trimmed);
-        if (cm) {
-          const stageName = normalizeStage(cm[1].trim());
-          const rawPct = Math.min(parseFloat(cm[2]), 100);
-          const scaledPct = Math.round(batchProgressBase + rawPct * batchProgressScale);
-          const elapsed = (Date.now() - startTime) / 1000;
-          const eta = rawPct > 1 ? Math.round(elapsed * (100 - rawPct) / rawPct) : null;
-          currentStage = stageName;
-          lastProgress = rawPct;
-          sendProgress({
-            progress: scaledPct,
-            currentFile: path.basename(filePath),
-            completedFiles, totalFiles,
-            stageName, stageCur: null, stageTotal: null,
-            etaSeconds: eta,
-            elapsedSeconds: Math.round(elapsed),
-          });
-          return;
-        }
-
-        // 3. tqdm overall: "translate:  14%|..."
-        const om = tqdmOverallRegex.exec(trimmed);
-        if (om) {
-          const rawPct = Math.min(parseFloat(om[1]), 100);
-          const scaledPct = Math.round(batchProgressBase + rawPct * batchProgressScale);
-          const elapsed = (Date.now() - startTime) / 1000;
-          const eta = rawPct > 1 ? Math.round(elapsed * (100 - rawPct) / rawPct) : null;
-          lastProgress = rawPct;
-          sendProgress({
-            progress: scaledPct,
-            currentFile: path.basename(filePath),
-            completedFiles, totalFiles,
-            stageName: currentStage,
-            stageCur: null, stageTotal: null,
-            etaSeconds: eta,
-            elapsedSeconds: Math.round(elapsed),
-          });
-          return;
         }
       }
 
-      function handleOutput(text) {
-        // Detect CoreML GPU acceleration
+      // Parse stdout for JSON progress lines (wrapper mode)
+      function handleStdout(text) {
+        if (!useWrapper) {
+          // In CLI mode, stdout is also forwarded as log
+          handleStderr(text);
+          return;
+        }
+        stdoutBuffer += text;
+        const lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const event = JSON.parse(trimmed);
+            handleJsonEvent(event);
+          } catch {
+            // Not JSON — forward as log
+            mainWindow?.webContents.send('translation-log', trimmed + '\n');
+          }
+        }
+      }
+
+      // stderr: rich logging + CoreML detection (both modes)
+      function handleStderr(text) {
         if (text.includes('CoreMLExecutionProvider')) {
           mainWindow?.webContents.send('translation-gpu', { enabled: true });
         }
         mainWindow?.webContents.send('translation-log', text);
-
-        // Handle pipe line buffering: data chunks may split mid-line
-        // tqdm uses \r (carriage return) in pipe mode, rich logging uses \n
-        const combined = incompleteLine + text;
-        const lines = combined.split(/[\r\n]+/);
-        incompleteLine = lines.pop() || ''; // last piece may be incomplete
-        for (const line of lines) {
-          parseLine(line);
-        }
       }
 
-      proc.stdout.on('data', (data) => handleOutput(data.toString()));
-      proc.stderr.on('data', (data) => handleOutput(data.toString()));
+      proc.stdout.on('data', (data) => handleStdout(data.toString()));
+      proc.stderr.on('data', (data) => handleStderr(data.toString()));
 
       proc.on('close', (code) => {
         clearInterval(elapsedTimer);
-        // Flush any remaining buffered line
-        if (incompleteLine) {
-          parseLine(incompleteLine);
-          incompleteLine = '';
+        // Flush remaining stdout buffer
+        if (stdoutBuffer.trim()) {
+          try {
+            const event = JSON.parse(stdoutBuffer.trim());
+            handleJsonEvent(event);
+          } catch {}
         }
         translationProcess = null;
         if (code === 0) {
