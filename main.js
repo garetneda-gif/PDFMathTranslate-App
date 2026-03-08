@@ -786,11 +786,41 @@ ipcMain.handle('start-translation', async (event, options) => {
     return args;
   }
 
-  function getExpectedOutputs(baseName, outDir) {
-    const outputs = [];
-    if (outputFormat !== 'dual') outputs.push(path.join(outDir, `${baseName}.zh.mono.pdf`));
-    if (outputFormat !== 'mono') outputs.push(path.join(outDir, `${baseName}.zh.dual.pdf`));
-    return outputs;
+  function getOutputCandidateGroups(baseName, outDir) {
+    const groups = [];
+    if (outputFormat !== 'dual') {
+      groups.push({
+        kind: 'mono',
+        candidates: [
+          path.join(outDir, `${baseName}.zh.mono.pdf`),
+          path.join(outDir, `${baseName}.no_watermark.zh.mono.pdf`),
+        ],
+      });
+    }
+    if (outputFormat !== 'mono') {
+      groups.push({
+        kind: 'dual',
+        candidates: [
+          path.join(outDir, `${baseName}.zh.dual.pdf`),
+          path.join(outDir, `${baseName}.no_watermark.zh.dual.pdf`),
+        ],
+      });
+    }
+    return groups;
+  }
+
+  function resolveOutputCandidates(groups) {
+    const resolved = [];
+    const missing = [];
+    for (const group of groups) {
+      const found = group.candidates.find((file) => fs.existsSync(file));
+      if (found) {
+        resolved.push({ kind: group.kind, file: found });
+      } else {
+        missing.push(group);
+      }
+    }
+    return { resolved, missing };
   }
 
   // Resolve wrapper script path (works both in dev and inside asar)
@@ -1095,19 +1125,15 @@ ipcMain.handle('start-translation', async (event, options) => {
               { batchIndex: i, batchTotal: batches.length, batchStart: start, batchEnd: end, totalPageCount: pageCount });
 
             // Collect output files from this batch (pdf2zh-next 2.x naming: batch.zh.mono.pdf / batch.zh.dual.pdf)
-            const expectedBatchOutputs = [];
-            if (outputFormat !== 'dual') expectedBatchOutputs.push(path.join(batchTmpDir, 'batch.zh.mono.pdf'));
-            if (outputFormat !== 'mono') expectedBatchOutputs.push(path.join(batchTmpDir, 'batch.zh.dual.pdf'));
-            const missingBatchOutputs = expectedBatchOutputs.filter((f) => !fs.existsSync(f));
-            if (missingBatchOutputs.length > 0) {
-              throw new Error(`分批输出缺失: ${missingBatchOutputs.map((f) => path.basename(f)).join(', ')}`);
+            const batchOutputGroups = getOutputCandidateGroups('batch', batchTmpDir);
+            const batchOutputs = resolveOutputCandidates(batchOutputGroups);
+            if (batchOutputs.missing.length > 0) {
+              throw new Error(`分批输出缺失: ${batchOutputs.missing.map((g) => g.kind).join(', ')}`);
             }
 
-            if (outputFormat !== 'dual') {
-              monoOutputs.push(path.join(batchTmpDir, 'batch.zh.mono.pdf'));
-            }
-            if (outputFormat !== 'mono') {
-              dualOutputs.push(path.join(batchTmpDir, 'batch.zh.dual.pdf'));
+            for (const output of batchOutputs.resolved) {
+              if (output.kind === 'mono') monoOutputs.push(output.file);
+              if (output.kind === 'dual') dualOutputs.push(output.file);
             }
           }
 
@@ -1164,15 +1190,21 @@ ipcMain.handle('start-translation', async (event, options) => {
 
     // ── Normal (non-batch) mode ──
     const args = buildArgs(filePath, undefined, finalOutputDir);
-    const expectedOutputs = getExpectedOutputs(baseName, finalOutputDir);
+    const expectedOutputGroups = getOutputCandidateGroups(baseName, finalOutputDir);
     try {
       await spawnPdf2zh(args, startTime, filePath, completedFiles, totalFiles, 0, 1);
-      const missingOutputs = expectedOutputs.filter((f) => !fs.existsSync(f));
-      if (missingOutputs.length > 0) {
-        throw new Error(`翻译未生成输出文件: ${missingOutputs.map((f) => path.basename(f)).join(', ')}`);
+      const resolvedOutputs = resolveOutputCandidates(expectedOutputGroups);
+      if (resolvedOutputs.missing.length > 0) {
+        const missingNames = resolvedOutputs.missing
+          .flatMap((group) => group.candidates.map((file) => path.basename(file)));
+        throw new Error(`翻译未生成输出文件: ${missingNames.join(', ')}`);
       }
     } catch (err) {
-      for (const f of expectedOutputs) { try { fs.unlinkSync(f); } catch {} }
+      for (const group of expectedOutputGroups) {
+        for (const file of group.candidates) {
+          try { fs.unlinkSync(file); } catch {}
+        }
+      }
       throw err;
     }
 
