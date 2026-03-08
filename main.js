@@ -598,16 +598,22 @@ ipcMain.handle('start-translation', async (event, options) => {
         return name ? (stageNameNormalize[name] || name) : name;
       }
 
-      // Tick elapsed time every 2s
+      // Tick elapsed time every 2s; also flush any buffered tqdm line
       const elapsedTimer = setInterval(() => {
         const elapsed = Math.round((Date.now() - startTime) / 1000);
         mainWindow?.webContents.send('translation-tick', {
           elapsedSeconds: elapsed,
           stageName: currentStage,
         });
+        // Flush incompleteLine periodically — tqdm uses \r (not \n) in pipe mode,
+        // so the latest progress update may sit in the buffer indefinitely
+        if (incompleteLine) {
+          parseLine(incompleteLine);
+          incompleteLine = '';
+        }
       }, 2000);
 
-      // tqdm output format (non-TTY pipe mode):
+      // tqdm output format (pipe mode, uses \r as separator):
       //   "translate:  14%|█▍        | 14.11/100 [00:10<01:04,  1.32it/s]"
       //   "Parse Page Layout (2/2):  31%|███       | 30.59/100 [00:11<00:16,  4.32it/s]"
       //   "Translate Paragraphs (Complete):  85%|████▌ | 85.46/100 [00:18<00:01,  8.32it/s]"
@@ -692,6 +698,7 @@ ipcMain.handle('start-translation', async (event, options) => {
         mainWindow?.webContents.send('translation-log', text);
 
         // Handle pipe line buffering: data chunks may split mid-line
+        // tqdm uses \r (carriage return) in pipe mode, rich logging uses \n
         const combined = incompleteLine + text;
         const lines = combined.split(/[\r\n]+/);
         incompleteLine = lines.pop() || ''; // last piece may be incomplete
@@ -705,6 +712,11 @@ ipcMain.handle('start-translation', async (event, options) => {
 
       proc.on('close', (code) => {
         clearInterval(elapsedTimer);
+        // Flush any remaining buffered line
+        if (incompleteLine) {
+          parseLine(incompleteLine);
+          incompleteLine = '';
+        }
         translationProcess = null;
         if (code === 0) {
           resolve();
