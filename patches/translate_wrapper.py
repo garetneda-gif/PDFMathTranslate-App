@@ -15,12 +15,15 @@ import json
 import logging
 import sys
 
-from rich.logging import RichHandler
-
 
 def setup_logging():
-    """Mirror pdf2zh-next's logging setup."""
-    logging.basicConfig(level=logging.INFO, handlers=[RichHandler()])
+    """Mirror pdf2zh-next's logging setup, with graceful fallback."""
+    try:
+        from rich.logging import RichHandler
+        handlers = [RichHandler()]
+    except ImportError:
+        handlers = [logging.StreamHandler(sys.stderr)]
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
     for name in ("httpx", "openai", "httpcore", "http11"):
         lg = logging.getLogger(name)
         lg.setLevel("CRITICAL")
