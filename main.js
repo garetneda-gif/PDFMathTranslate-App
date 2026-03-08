@@ -593,131 +593,219 @@ ipcMain.handle('start-translation', async (event, options) => {
     return fs.existsSync(src) ? extractFromAsar(src) : null;
   })();
   const venvPython = path.join(os.homedir(), '.pdf2zh-venv/bin/python');
-  const useWrapper = wrapperScript && fs.existsSync(venvPython);
 
   // Spawn a single pdf2zh process.
   // batchProgressBase (0-100): progress offset for this batch
   // batchProgressScale (0-1): fraction of total progress this batch represents
   function spawnPdf2zh(args, startTime, filePath, completedFiles, totalFiles, batchProgressBase, batchProgressScale, batchContext = {}) {
-    return new Promise((resolve, reject) => {
-      // Use wrapper script for reliable JSON progress, fall back to pdf2zh CLI
-      let proc;
-      if (useWrapper) {
-        proc = spawn(venvPython, [wrapperScript, ...args], { env: procEnv, shell: false });
-      } else {
-        proc = spawn(pdf2zhBin, args, { env: procEnv, shell: false });
-      }
-      translationProcess = proc;
+    // Try wrapper first, fall back to CLI if wrapper fails
+    function attempt(mode) {
+      return new Promise((resolve, reject) => {
+        let proc;
+        const isWrapper = mode === 'wrapper';
+        if (isWrapper) {
+          proc = spawn(venvPython, [wrapperScript, ...args], { env: procEnv, shell: false });
+        } else {
+          proc = spawn(pdf2zhBin, args, { env: procEnv, shell: false });
+        }
+        translationProcess = proc;
 
-      let currentStage = null;
-      let lastProgress = 0;
-      let stdoutBuffer = ''; // buffer for JSON line splitting on stdout
+        let currentStage = null;
+        let lastProgress = 0;
+        let lineBuffer = ''; // buffer for line splitting
 
-      function sendProgress(data) {
-        mainWindow?.webContents.send('translation-progress', { ...data, ...batchContext });
-      }
+        function sendProgress(data) {
+          mainWindow?.webContents.send('translation-progress', { ...data, ...batchContext });
+        }
 
-      // Normalize stage names to canonical names used in renderer
-      const stageNameNormalize = {
-        'Parse PDF and Create Intermediate Representation': 'Parse PDF and Create IR',
-      };
-      function normalizeStage(name) {
-        return name ? (stageNameNormalize[name] || name) : name;
-      }
+        const stageNameNormalize = {
+          'Parse PDF and Create Intermediate Representation': 'Parse PDF and Create IR',
+        };
+        function normalizeStage(name) {
+          return name ? (stageNameNormalize[name] || name) : name;
+        }
 
-      // Tick elapsed time every 2s
-      const elapsedTimer = setInterval(() => {
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        mainWindow?.webContents.send('translation-tick', {
-          elapsedSeconds: elapsed,
-          stageName: currentStage,
-        });
-      }, 2000);
-
-      // --- JSON progress event handler (wrapper mode) ---
-      function handleJsonEvent(event) {
-        const type = event.type;
-        const elapsed = (Date.now() - startTime) / 1000;
-
-        if (type === 'progress_start' || type === 'progress_update' || type === 'progress_end') {
-          const stageName = normalizeStage(event.stage);
-          const rawPct = Math.min(event.overall_progress || 0, 100);
-          const scaledPct = Math.round(batchProgressBase + rawPct * batchProgressScale);
-          const eta = rawPct > 1 ? Math.round(elapsed * (100 - rawPct) / rawPct) : null;
-          currentStage = stageName;
-          lastProgress = rawPct;
-          sendProgress({
-            progress: scaledPct,
-            currentFile: path.basename(filePath),
-            completedFiles, totalFiles,
-            stageName,
-            stageCur: event.part_index || null,
-            stageTotal: event.total_parts || null,
-            etaSeconds: eta,
-            elapsedSeconds: Math.round(elapsed),
+        const elapsedTimer = setInterval(() => {
+          const elapsed = Math.round((Date.now() - startTime) / 1000);
+          mainWindow?.webContents.send('translation-tick', {
+            elapsedSeconds: elapsed,
+            stageName: currentStage,
           });
-        }
-      }
+          // In CLI mode, flush buffered tqdm line periodically
+          if (!isWrapper && lineBuffer) {
+            parseTqdmLine(lineBuffer);
+            lineBuffer = '';
+          }
+        }, 2000);
 
-      // Parse stdout for JSON progress lines (wrapper mode)
-      function handleStdout(text) {
-        if (!useWrapper) {
-          // In CLI mode, stdout is also forwarded as log
-          handleStderr(text);
-          return;
-        }
-        stdoutBuffer += text;
-        const lines = stdoutBuffer.split('\n');
-        stdoutBuffer = lines.pop() || '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            const event = JSON.parse(trimmed);
-            handleJsonEvent(event);
-          } catch {
-            // Not JSON — forward as log
-            mainWindow?.webContents.send('translation-log', trimmed + '\n');
+        // --- JSON progress event handler (wrapper mode) ---
+        function handleJsonEvent(event) {
+          const type = event.type;
+          const elapsed = (Date.now() - startTime) / 1000;
+          if (type === 'progress_start' || type === 'progress_update' || type === 'progress_end') {
+            const stageName = normalizeStage(event.stage);
+            const rawPct = Math.min(event.overall_progress || 0, 100);
+            const scaledPct = Math.round(batchProgressBase + rawPct * batchProgressScale);
+            const eta = rawPct > 1 ? Math.round(elapsed * (100 - rawPct) / rawPct) : null;
+            currentStage = stageName;
+            lastProgress = rawPct;
+            sendProgress({
+              progress: scaledPct,
+              currentFile: path.basename(filePath),
+              completedFiles, totalFiles,
+              stageName,
+              stageCur: event.part_index || null,
+              stageTotal: event.total_parts || null,
+              etaSeconds: eta,
+              elapsedSeconds: Math.round(elapsed),
+            });
           }
         }
-      }
 
-      // stderr: rich logging + CoreML detection (both modes)
-      function handleStderr(text) {
-        if (text.includes('CoreMLExecutionProvider')) {
-          mainWindow?.webContents.send('translation-gpu', { enabled: true });
-        }
-        mainWindow?.webContents.send('translation-log', text);
-      }
+        // --- tqdm line parser (CLI fallback mode) ---
+        const tqdmStageRegex = /^(.+?)\s+\((\d+)\/(\d+)\):\s+(\d+(?:\.\d+)?)%/;
+        const tqdmCompleteRegex = /^(.+?)\s+\(Complete\):\s+(\d+(?:\.\d+)?)%/;
+        const tqdmOverallRegex = /^translate:\s+(\d+(?:\.\d+)?)%/;
 
-      proc.stdout.on('data', (data) => handleStdout(data.toString()));
-      proc.stderr.on('data', (data) => handleStderr(data.toString()));
+        function parseTqdmLine(line) {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+          const elapsed = (Date.now() - startTime) / 1000;
 
-      proc.on('close', (code) => {
-        clearInterval(elapsedTimer);
-        // Flush remaining stdout buffer
-        if (stdoutBuffer.trim()) {
-          try {
-            const event = JSON.parse(stdoutBuffer.trim());
-            handleJsonEvent(event);
-          } catch {}
+          const sm = tqdmStageRegex.exec(trimmed);
+          if (sm) {
+            const stageName = normalizeStage(sm[1].trim());
+            const rawPct = Math.min(parseFloat(sm[4]), 100);
+            currentStage = stageName;
+            lastProgress = rawPct;
+            sendProgress({
+              progress: Math.round(batchProgressBase + rawPct * batchProgressScale),
+              currentFile: path.basename(filePath),
+              completedFiles, totalFiles,
+              stageName, stageCur: parseInt(sm[2]), stageTotal: parseInt(sm[3]),
+              etaSeconds: rawPct > 1 ? Math.round(elapsed * (100 - rawPct) / rawPct) : null,
+              elapsedSeconds: Math.round(elapsed),
+            });
+            return;
+          }
+          const cm = tqdmCompleteRegex.exec(trimmed);
+          if (cm) {
+            const stageName = normalizeStage(cm[1].trim());
+            const rawPct = Math.min(parseFloat(cm[2]), 100);
+            currentStage = stageName;
+            lastProgress = rawPct;
+            sendProgress({
+              progress: Math.round(batchProgressBase + rawPct * batchProgressScale),
+              currentFile: path.basename(filePath),
+              completedFiles, totalFiles,
+              stageName, stageCur: null, stageTotal: null,
+              etaSeconds: rawPct > 1 ? Math.round(elapsed * (100 - rawPct) / rawPct) : null,
+              elapsedSeconds: Math.round(elapsed),
+            });
+            return;
+          }
+          const om = tqdmOverallRegex.exec(trimmed);
+          if (om) {
+            const rawPct = Math.min(parseFloat(om[1]), 100);
+            lastProgress = rawPct;
+            sendProgress({
+              progress: Math.round(batchProgressBase + rawPct * batchProgressScale),
+              currentFile: path.basename(filePath),
+              completedFiles, totalFiles,
+              stageName: currentStage, stageCur: null, stageTotal: null,
+              etaSeconds: rawPct > 1 ? Math.round(elapsed * (100 - rawPct) / rawPct) : null,
+              elapsedSeconds: Math.round(elapsed),
+            });
+          }
         }
-        translationProcess = null;
-        if (code === 0) {
-          resolve();
-        } else if (code === null) {
-          reject(new Error('CANCELLED'));
-        } else {
-          reject(new Error(`Translation failed for ${path.basename(filePath)} (exit code: ${code})`));
+
+        // Common: detect CoreML and forward as log
+        function forwardLog(text) {
+          if (text.includes('CoreMLExecutionProvider')) {
+            mainWindow?.webContents.send('translation-gpu', { enabled: true });
+          }
+          mainWindow?.webContents.send('translation-log', text);
         }
+
+        // CLI mode: parse tqdm from mixed stdout/stderr
+        function handleMixedOutput(text) {
+          const combined = lineBuffer + text;
+          const lines = combined.split(/[\r\n]+/);
+          lineBuffer = lines.pop() || '';
+          for (const line of lines) {
+            parseTqdmLine(line);
+          }
+        }
+
+        proc.stdout.on('data', (data) => {
+          const text = data.toString();
+          if (isWrapper) {
+            // Wrapper mode: parse JSON progress from stdout
+            lineBuffer += text;
+            const lines = lineBuffer.split('\n');
+            lineBuffer = lines.pop() || '';
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed) continue;
+              try {
+                handleJsonEvent(JSON.parse(trimmed));
+              } catch {
+                forwardLog(trimmed + '\n');
+              }
+            }
+          } else {
+            // CLI mode: forward as log + parse tqdm
+            forwardLog(text);
+            handleMixedOutput(text);
+          }
+        });
+        proc.stderr.on('data', (data) => {
+          const text = data.toString();
+          forwardLog(text);
+          if (!isWrapper) {
+            handleMixedOutput(text);
+          }
+        });
+
+        proc.on('close', (code) => {
+          clearInterval(elapsedTimer);
+          if (lineBuffer.trim()) {
+            if (isWrapper) {
+              try { handleJsonEvent(JSON.parse(lineBuffer.trim())); } catch {}
+            } else {
+              parseTqdmLine(lineBuffer);
+            }
+          }
+          lineBuffer = '';
+          translationProcess = null;
+          if (code === 0) {
+            resolve();
+          } else if (code === null) {
+            reject(new Error('CANCELLED'));
+          } else {
+            reject(new Error(`exit:${code}`));
+          }
+        });
+
+        proc.on('error', (err) => {
+          clearInterval(elapsedTimer);
+          translationProcess = null;
+          reject(err);
+        });
       });
+    }
 
-      proc.on('error', (err) => {
-        clearInterval(elapsedTimer);
-        translationProcess = null;
-        reject(err);
+    // Try wrapper first; on failure, retry with CLI
+    const canWrapper = wrapperScript && fs.existsSync(venvPython);
+    if (canWrapper) {
+      return attempt('wrapper').catch((err) => {
+        if (err.message === 'CANCELLED') throw err;
+        console.log(`[wrapper failed: ${err.message}] falling back to pdf2zh CLI`);
+        mainWindow?.webContents.send('translation-log', '[进度包装器失败，回退到 CLI 模式]\n');
+        return attempt('cli');
       });
-    });
+    }
+    return attempt('cli');
   }
 
   const totalFiles = files.length;
