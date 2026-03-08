@@ -4,6 +4,20 @@ const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 
+// Extract a file from asar to a temp location so external processes (Python) can read it.
+// Inside asar, Node.js can read files via Electron's virtual fs, but child processes cannot.
+function extractFromAsar(asarPath) {
+  if (!asarPath.includes('.asar')) return asarPath; // not in asar, return as-is
+  const tmpPath = path.join(os.tmpdir(), 'pmt-' + path.basename(asarPath));
+  try {
+    const content = fs.readFileSync(asarPath);
+    fs.writeFileSync(tmpPath, content);
+    return tmpPath;
+  } catch {
+    return asarPath; // fallback
+  }
+}
+
 // Find pdf2zh binary - macOS GUI apps don't inherit shell PATH
 function findPdf2zh() {
   const home = process.env.HOME || os.homedir();
@@ -174,9 +188,10 @@ app.whenReady().then(async () => {
   // (covers users who upgrade the .app but already have the venv)
   const home = os.homedir();
   const venvPython = path.join(home, '.pdf2zh-venv/bin/python');
-  const patchScript = path.join(__dirname, 'patches', 'apply_coreml.py');
-  if (fs.existsSync(venvPython) && fs.existsSync(patchScript)) {
+  const patchSrc = path.join(__dirname, 'patches', 'apply_coreml.py');
+  if (fs.existsSync(venvPython) && fs.existsSync(patchSrc)) {
     try {
+      const patchScript = extractFromAsar(patchSrc);
       const proc = spawn(venvPython, [patchScript], { env: process.env, shell: false });
       proc.on('close', () => {});
       proc.on('error', () => {});
@@ -289,7 +304,7 @@ ipcMain.handle('update-pdf2zh', async () => {
   if (upgradeResult.success) {
     const home = os.homedir();
     const venvPython = path.join(home, '.pdf2zh-venv/bin/python');
-    const patchScript = path.join(__dirname, 'patches', 'apply_coreml.py');
+    const patchScript = extractFromAsar(path.join(__dirname, 'patches', 'apply_coreml.py'));
     try {
       await new Promise((resolve, reject) => {
         const proc = spawn(venvPython, [patchScript], { env: process.env, shell: false });
@@ -439,7 +454,7 @@ ipcMain.handle('setup-environment', async () => {
 
     // Apply CoreML GPU acceleration patch to babeldoc
     log('\n正在应用 CoreML GPU 加速补丁...\n');
-    const patchScript = path.join(__dirname, 'patches', 'apply_coreml.py');
+    const patchScript = extractFromAsar(path.join(__dirname, 'patches', 'apply_coreml.py'));
     const venvPython = path.join(venvPath, 'bin/python');
     try {
       await runStep(venvPython, [patchScript]);
