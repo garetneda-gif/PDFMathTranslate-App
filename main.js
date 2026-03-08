@@ -786,6 +786,13 @@ ipcMain.handle('start-translation', async (event, options) => {
     return args;
   }
 
+  function getExpectedOutputs(baseName, outDir) {
+    const outputs = [];
+    if (outputFormat !== 'dual') outputs.push(path.join(outDir, `${baseName}.zh.mono.pdf`));
+    if (outputFormat !== 'mono') outputs.push(path.join(outDir, `${baseName}.zh.dual.pdf`));
+    return outputs;
+  }
+
   // Resolve wrapper script path (works both in dev and inside asar)
   const wrapperScript = (() => {
     const src = path.join(__dirname, 'patches', 'translate_wrapper.py');
@@ -1088,13 +1095,19 @@ ipcMain.handle('start-translation', async (event, options) => {
               { batchIndex: i, batchTotal: batches.length, batchStart: start, batchEnd: end, totalPageCount: pageCount });
 
             // Collect output files from this batch (pdf2zh-next 2.x naming: batch.zh.mono.pdf / batch.zh.dual.pdf)
+            const expectedBatchOutputs = [];
+            if (outputFormat !== 'dual') expectedBatchOutputs.push(path.join(batchTmpDir, 'batch.zh.mono.pdf'));
+            if (outputFormat !== 'mono') expectedBatchOutputs.push(path.join(batchTmpDir, 'batch.zh.dual.pdf'));
+            const missingBatchOutputs = expectedBatchOutputs.filter((f) => !fs.existsSync(f));
+            if (missingBatchOutputs.length > 0) {
+              throw new Error(`分批输出缺失: ${missingBatchOutputs.map((f) => path.basename(f)).join(', ')}`);
+            }
+
             if (outputFormat !== 'dual') {
-              const f = path.join(batchTmpDir, 'batch.zh.mono.pdf');
-              if (fs.existsSync(f)) monoOutputs.push(f);
+              monoOutputs.push(path.join(batchTmpDir, 'batch.zh.mono.pdf'));
             }
             if (outputFormat !== 'mono') {
-              const f = path.join(batchTmpDir, 'batch.zh.dual.pdf');
-              if (fs.existsSync(f)) dualOutputs.push(f);
+              dualOutputs.push(path.join(batchTmpDir, 'batch.zh.dual.pdf'));
             }
           }
 
@@ -1151,12 +1164,13 @@ ipcMain.handle('start-translation', async (event, options) => {
 
     // ── Normal (non-batch) mode ──
     const args = buildArgs(filePath, undefined, finalOutputDir);
-    const expectedOutputs = [
-      path.join(finalOutputDir, `${baseName}.zh.mono.pdf`),
-      path.join(finalOutputDir, `${baseName}.zh.dual.pdf`),
-    ];
+    const expectedOutputs = getExpectedOutputs(baseName, finalOutputDir);
     try {
       await spawnPdf2zh(args, startTime, filePath, completedFiles, totalFiles, 0, 1);
+      const missingOutputs = expectedOutputs.filter((f) => !fs.existsSync(f));
+      if (missingOutputs.length > 0) {
+        throw new Error(`翻译未生成输出文件: ${missingOutputs.map((f) => path.basename(f)).join(', ')}`);
+      }
     } catch (err) {
       for (const f of expectedOutputs) { try { fs.unlinkSync(f); } catch {} }
       throw err;

@@ -63,7 +63,11 @@ def emit(event: dict):
 
 
 async def run():
-    from pdf2zh_next.config.model import ConfigManager
+    try:
+        from pdf2zh_next.config.model import ConfigManager
+    except ImportError:
+        # pdf2zh-next >= 2.8 moved ConfigManager to pdf2zh_next.config
+        from pdf2zh_next.config import ConfigManager
     from pdf2zh_next.high_level import do_translate_async_stream
 
     setup_logging()
