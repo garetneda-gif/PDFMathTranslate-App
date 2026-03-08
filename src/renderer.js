@@ -37,6 +37,7 @@ let selectedFiles = [];
 let isTranslating = false;
 let translationStartTime = null;
 let elapsedTimerUI = null;
+let pendingEnvStatus = null;
 
 // Services that need API keys
 const apiServices = new Set([
@@ -155,23 +156,32 @@ function appendSetupLog(text) {
   $('#setup-log-container').scrollTop = $('#setup-log-container').scrollHeight;
 }
 
-async function showSetupPanel() {
+async function showSetupPanel(envStatus = null) {
+  pendingEnvStatus = envStatus;
   setupOverlay.style.display = 'block';
-  // Hide install button — auto-start, only show on error for retry
+  setupLogContent.textContent = '';
+  if (envStatus?.venvExists && envStatus?.summary) {
+    setupErrorEl.textContent = `检测到现有 pdf2zh 运行环境异常：${envStatus.summary}。将自动重建 ~/.pdf2zh-venv。`;
+    setupErrorEl.style.display = 'block';
+  } else {
+    setupErrorEl.style.display = 'none';
+  }
   btnSetupInstall.style.display = 'none';
-  // Auto-start after a brief paint delay
   setTimeout(runSetup, 400);
 }
 
 async function runSetup() {
+  window.api.removeAllListeners('setup-log');
+  window.api.removeAllListeners('setup-step');
+
   btnSetupInstall.disabled = true;
   btnSetupInstall.style.opacity = '0.6';
   btnSetupInstall.textContent = '安装中，请勿关闭应用...';
 
   setupLogWrap.style.display = 'block';
-  setupErrorEl.style.display = 'none';
+  if (!pendingEnvStatus?.venvExists) setupErrorEl.style.display = 'none';
 
-  setSetupStep(0, 'active', '检测中...');
+  setSetupStep(0, 'active', pendingEnvStatus?.venvExists ? '修复中...' : '检测中...');
 
   // Listen to streaming events
   window.api.onSetupLog((text) => appendSetupLog(text));
@@ -224,7 +234,7 @@ async function init() {
   // Check if pdf2zh environment is ready; if not, show setup panel
   const envStatus = await window.api.checkEnvironment();
   if (!envStatus.ready) {
-    await showSetupPanel();
+    await showSetupPanel(envStatus);
     return;
   }
 
@@ -237,9 +247,13 @@ async function initAfterEnvReady() {
     setStatus('ready', `pdf2zh v${result.version || '?'}`);
     // Check for updates in background
     checkForUpdate(result.version);
+  } else if (result.reason) {
+    setStatus('error', 'pdf2zh 环境异常');
+    appendLog(`⚠ pdf2zh 运行环境异常：${result.summary || result.reason}\n`);
+    await showSetupPanel({ ready: false, venvExists: true, reason: result.reason, summary: result.summary });
   } else {
-    setStatus('error', 'pdf2zh \u672A\u5B89\u88C5');
-    appendLog('\u26A0 pdf2zh \u672A\u68C0\u6D4B\u5230\n\u8BF7\u5148\u5B89\u88C5\uFF1Apip install pdf2zh-next\n');
+    setStatus('error', 'pdf2zh 未安装');
+    appendLog('⚠ pdf2zh 未检测到\n请先安装：pip install pdf2zh-next\n');
   }
 }
 
@@ -549,6 +563,10 @@ async function startTranslation() {
     } else {
       setStatus('error', '翻译失败');
       appendLog(`\n❌ 错误: ${err.message}\n`);
+      if (err.message.includes('pdf2zh 运行环境异常')) {
+        const envStatus = await window.api.checkEnvironment();
+        if (!envStatus.ready) await showSetupPanel(envStatus);
+      }
     }
     setProgressIndeterminate(false);
   } finally {

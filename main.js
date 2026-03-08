@@ -80,6 +80,174 @@ function findPdf2zh() {
 
 let pdf2zhBin = findPdf2zh();
 
+function getVenvPaths(home = os.homedir()) {
+  const venvPath = path.join(home, '.pdf2zh-venv');
+  return {
+    venvPath,
+    pythonBin: path.join(venvPath, 'bin/python'),
+    pipBin: path.join(venvPath, 'bin/pip'),
+    pdf2zhBin: path.join(venvPath, 'bin/pdf2zh'),
+  };
+}
+
+function summarizeVenvHealth(health) {
+  if (!health?.exists) return '未检测到 ~/.pdf2zh-venv';
+  switch (health.reason) {
+    case 'missing-python':
+      return '虚拟环境缺少 python 可执行文件';
+    case 'missing-executables':
+      return `虚拟环境缺少可执行文件：${(health.missingExecutables || []).join(', ')}`;
+    case 'probe-failed':
+      return `虚拟环境探测失败：${health.error || '无法启动 venv Python'}`;
+    case 'invalid-probe-output':
+      return '虚拟环境探测返回了不可解析的结果';
+    case 'python-version':
+      return `虚拟环境 Python 版本不受支持：${health.version || 'unknown'}`;
+    case 'not-venv':
+      return '当前 python 未正确激活到 ~/.pdf2zh-venv';
+    case 'prefix-mismatch':
+      return `虚拟环境前缀异常：${health.prefix || 'unknown'}`;
+    case 'missing-packages':
+      return `虚拟环境缺少依赖：${(health.missingPackages || []).join(', ')}`;
+    default:
+      return health.error || '虚拟环境状态异常';
+  }
+}
+
+async function inspectPdf2zhVenv() {
+  const { venvPath, pythonBin, pipBin: venvPip, pdf2zhBin: venvPdf2zh } = getVenvPaths();
+  if (!fs.existsSync(venvPath)) {
+    return { exists: false, healthy: false, reason: 'missing' };
+  }
+  if (!fs.existsSync(pythonBin)) {
+    return {
+      exists: true,
+      healthy: false,
+      reason: 'missing-python',
+      summary: '虚拟环境缺少 python 可执行文件',
+    };
+  }
+
+  const missingExecutables = [venvPip, venvPdf2zh].filter((file) => {
+    try {
+      fs.accessSync(file, fs.constants.X_OK);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (missingExecutables.length > 0) {
+    const health = {
+      exists: true,
+      healthy: false,
+      reason: 'missing-executables',
+      missingExecutables,
+    };
+    health.summary = summarizeVenvHealth(health);
+    return health;
+  }
+
+  const expectedPrefix = (() => {
+    try {
+      return fs.realpathSync.native(venvPath);
+    } catch {
+      return path.resolve(venvPath);
+    }
+  })();
+
+  const probeScript = [
+    'import importlib.util, json, pathlib, sys',
+    'expected = pathlib.Path(sys.argv[1]).resolve()',
+    'prefix = pathlib.Path(sys.prefix).resolve()',
+    'base_prefix = pathlib.Path(sys.base_prefix).resolve()',
+    'checks = {',
+    '  "pdf2zh_next": importlib.util.find_spec("pdf2zh_next") is not None,',
+    '  "pypdf": importlib.util.find_spec("pypdf") is not None,',
+    '}',
+    'version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"',
+    'minor = sys.version_info.minor',
+    'report = {',
+    '  "type": "venv-health",',
+    '  "version": version,',
+    '  "is_supported": sys.version_info.major == 3 and 10 <= minor <= 12,',
+    '  "is_venv": sys.prefix != sys.base_prefix,',
+    '  "prefix": str(prefix),',
+    '  "base_prefix": str(base_prefix),',
+    '  "expected_prefix": str(expected),',
+    '  "prefix_matches": prefix == expected,',
+    '  "checks": checks,',
+    '}',
+    'print(json.dumps(report, ensure_ascii=False))',
+  ].join('\n');
+
+  return new Promise((resolve) => {
+    const proc = spawn(pythonBin, ['-c', probeScript, expectedPrefix], {
+      env: process.env,
+      shell: false,
+    });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (d) => (stdout += d.toString()));
+    proc.stderr.on('data', (d) => (stderr += d.toString()));
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        const health = {
+          exists: true,
+          healthy: false,
+          reason: 'probe-failed',
+          error: stderr.trim() || `退出码 ${code}`,
+        };
+        health.summary = summarizeVenvHealth(health);
+        resolve(health);
+        return;
+      }
+
+      try {
+        const report = JSON.parse(stdout.trim());
+        const missingPackages = Object.entries(report.checks || {})
+          .filter(([, ok]) => !ok)
+          .map(([name]) => name);
+        let reason = null;
+        if (!report.is_supported) reason = 'python-version';
+        else if (!report.is_venv) reason = 'not-venv';
+        else if (!report.prefix_matches) reason = 'prefix-mismatch';
+        else if (missingPackages.length > 0) reason = 'missing-packages';
+        const health = {
+          exists: true,
+          healthy: reason === null,
+          reason: reason || 'ok',
+          version: report.version,
+          prefix: report.prefix,
+          basePrefix: report.base_prefix,
+          expectedPrefix: report.expected_prefix,
+          missingPackages,
+        };
+        health.summary = health.healthy ? '虚拟环境健康' : summarizeVenvHealth(health);
+        resolve(health);
+      } catch {
+        const health = {
+          exists: true,
+          healthy: false,
+          reason: 'invalid-probe-output',
+          error: stdout.trim() || stderr.trim(),
+        };
+        health.summary = summarizeVenvHealth(health);
+        resolve(health);
+      }
+    });
+    proc.on('error', (err) => {
+      const health = {
+        exists: true,
+        healthy: false,
+        reason: 'probe-failed',
+        error: err.message,
+      };
+      health.summary = summarizeVenvHealth(health);
+      resolve(health);
+    });
+  });
+}
+
 // Get total page count of a PDF using Python/pypdf
 function getPdfPageCount(filePath) {
   return new Promise((resolve) => {
@@ -184,12 +352,13 @@ function createWindow() {
 app.whenReady().then(async () => {
   createWindow();
 
-  // Hot-fix: apply CoreML patch on startup for existing installations
-  // (covers users who upgrade the .app but already have the venv)
-  const home = os.homedir();
-  const venvPython = path.join(home, '.pdf2zh-venv/bin/python');
+  const { pythonBin: venvPython } = getVenvPaths();
   const patchSrc = path.join(__dirname, 'patches', 'apply_coreml.py');
-  if (fs.existsSync(venvPython) && fs.existsSync(patchSrc)) {
+  const venvHealth = await inspectPdf2zhVenv();
+  if (venvHealth.exists && !venvHealth.healthy) {
+    console.log(`[pdf2zh venv] unhealthy: ${venvHealth.summary}`);
+  }
+  if (venvHealth.healthy && fs.existsSync(venvPython) && fs.existsSync(patchSrc)) {
     try {
       const patchScript = extractFromAsar(patchSrc);
       await new Promise((resolve) => {
@@ -241,6 +410,10 @@ ipcMain.handle('select-output-dir', async () => {
 });
 
 ipcMain.handle('check-pdf2zh', async () => {
+  const venvHealth = await inspectPdf2zhVenv();
+  if (!venvHealth.healthy) {
+    return { installed: false, version: '', bin: pdf2zhBin, reason: venvHealth.reason, summary: venvHealth.summary };
+  }
   return new Promise((resolve) => {
     const proc = spawn(pdf2zhBin, ['--version'], {
       env: process.env,
@@ -262,9 +435,13 @@ ipcMain.handle('check-pdf2zh', async () => {
 });
 
 // Check for pdf2zh-next updates via pip
-const pipBin = path.join(process.env.HOME || os.homedir(), '.pdf2zh-venv/bin/pip');
+const pipBin = getVenvPaths().pipBin;
 
 ipcMain.handle('check-pdf2zh-update', async () => {
+  const venvHealth = await inspectPdf2zhVenv();
+  if (!venvHealth.healthy) {
+    return { latest: null, installed: null, hasUpdate: false, reason: venvHealth.reason, summary: venvHealth.summary };
+  }
   return new Promise((resolve) => {
     const proc = spawn(pipBin, ['index', 'versions', 'pdf2zh-next'], {
       env: process.env,
@@ -289,6 +466,10 @@ ipcMain.handle('check-pdf2zh-update', async () => {
 });
 
 ipcMain.handle('update-pdf2zh', async () => {
+  const venvHealth = await inspectPdf2zhVenv();
+  if (!venvHealth.healthy) {
+    return { success: false, error: venvHealth.summary, reason: venvHealth.reason };
+  }
   const upgradeResult = await new Promise((resolve) => {
     const proc = spawn(pipBin, ['install', '--upgrade', 'pdf2zh-next'], {
       env: process.env,
@@ -389,19 +570,20 @@ function findPython3() {
 }
 
 ipcMain.handle('check-environment', async () => {
-  const home = os.homedir();
-  const venvPdf2zh = path.join(home, '.pdf2zh-venv/bin/pdf2zh');
   const pythonBin = findPython3();
+  const venvHealth = await inspectPdf2zhVenv();
   return {
-    ready: fs.existsSync(venvPdf2zh),
+    ready: venvHealth.healthy,
+    venvExists: venvHealth.exists,
+    reason: venvHealth.reason,
+    summary: venvHealth.summary || null,
     hasPython: !!pythonBin,
     pythonBin: pythonBin || null,
   };
 });
 
 ipcMain.handle('setup-environment', async () => {
-  const home = os.homedir();
-  const venvPath = path.join(home, '.pdf2zh-venv');
+  const { venvPath } = getVenvPaths();
 
   const log = (text) => mainWindow?.webContents.send('setup-log', text);
   const setStep = (step) => mainWindow?.webContents.send('setup-step', step);
@@ -426,6 +608,13 @@ ipcMain.handle('setup-environment', async () => {
   }
 
   try {
+    const currentHealth = await inspectPdf2zhVenv();
+    if (currentHealth.exists && !currentHealth.healthy) {
+      log(`⚠ 检测到已损坏的 pdf2zh 虚拟环境：${currentHealth.summary}\n`);
+      log('正在删除旧环境并重建 ~/.pdf2zh-venv ...\n');
+      fs.rmSync(venvPath, { recursive: true, force: true });
+    }
+
     log('\n[1/3] 创建 Python 虚拟环境 ~/.pdf2zh-venv ...\n');
     await runStep(pythonBin, ['-m', 'venv', venvPath]);
     log('✓ 虚拟环境就绪\n');
@@ -478,6 +667,11 @@ ipcMain.handle('setup-environment', async () => {
     // Refresh pdf2zh binary path now that venv exists
     pdf2zhBin = findPdf2zh();
 
+    const finalHealth = await inspectPdf2zhVenv();
+    if (!finalHealth.healthy) {
+      throw new Error(finalHealth.summary || '虚拟环境校验失败');
+    }
+
     log('\n✅ 安装完成！即将启动...\n');
 
     return { success: true };
@@ -488,6 +682,11 @@ ipcMain.handle('setup-environment', async () => {
 });
 
 ipcMain.handle('start-translation', async (event, options) => {
+  const venvHealth = await inspectPdf2zhVenv();
+  if (!venvHealth.healthy) {
+    throw new Error(`pdf2zh 运行环境异常：${venvHealth.summary || '请重新安装'}`);
+  }
+
   const {
     files,
     sourceLang,
@@ -667,8 +866,14 @@ ipcMain.handle('start-translation', async (event, options) => {
         const tqdmCompleteRegex = /^(.+?)\s+\(Complete\):\s+(\d+(?:\.\d+)?)%/;
         const tqdmOverallRegex = /^translate:\s+(\d+(?:\.\d+)?)%/;
 
+        function sanitizeTqdmLine(line) {
+          return line
+            .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '')
+            .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+        }
+
         function parseTqdmLine(line) {
-          const trimmed = line.trim();
+          const trimmed = sanitizeTqdmLine(line).trim();
           if (!trimmed) return;
           const elapsed = (Date.now() - startTime) / 1000;
 
