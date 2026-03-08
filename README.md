@@ -150,13 +150,13 @@ function handleOutput(text) {
 
 在 Apple Silicon 设备上，ONNX Runtime 支持通过 CoreML Execution Provider 将推理任务卸载到 Neural Engine / GPU，比纯 CPU 推理快 3–8 倍。
 
-**启用方式**：用户勾选"GPU 加速"后，主进程在子进程环境变量中注入：
+**默认启用**：每次翻译均自动注入，无需手动配置：
 
 ```js
 const procEnv = {
   ...process.env,
   PYTHONUNBUFFERED: '1',
-  ...(useGpu ? { PDF2ZH_USE_COREML: '1' } : {}),
+  PDF2ZH_USE_COREML: '1',   // 始终启用，Apple Silicon 自动走 Neural Engine
 };
 ```
 

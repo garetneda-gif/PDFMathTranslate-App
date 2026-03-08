@@ -484,7 +484,7 @@ ipcMain.handle('start-translation', async (event, options) => {
     groq: '--groq-model',
   };
 
-  const procEnv = { ...process.env, PYTHONUNBUFFERED: '1' };
+  const procEnv = { ...process.env, PYTHONUNBUFFERED: '1', PDF2ZH_USE_COREML: '1' };
 
   // Build CLI args for a single pdf2zh invocation
   function buildArgs(filePath, overridePages, overrideOutputDir) {
