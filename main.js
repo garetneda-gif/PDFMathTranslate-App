@@ -167,7 +167,22 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(async () => {
+  createWindow();
+
+  // Hot-fix: apply CoreML patch on startup for existing installations
+  // (covers users who upgrade the .app but already have the venv)
+  const home = os.homedir();
+  const venvPython = path.join(home, '.pdf2zh-venv/bin/python');
+  const patchScript = path.join(__dirname, 'patches', 'apply_coreml.py');
+  if (fs.existsSync(venvPython) && fs.existsSync(patchScript)) {
+    try {
+      const proc = spawn(venvPython, [patchScript], { env: process.env, shell: false });
+      proc.on('close', () => {});
+      proc.on('error', () => {});
+    } catch {}
+  }
+});
 
 app.on('window-all-closed', () => {
   if (translationProcess) {
