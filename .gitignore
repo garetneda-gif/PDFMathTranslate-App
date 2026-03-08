@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src/styles/output.css
+*.DS_Store
+.DS_Store
+--progress
+-ah
+rsync

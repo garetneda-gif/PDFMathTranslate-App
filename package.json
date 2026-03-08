@@ -1,0 +1,51 @@
+{
+  "name": "pdf-math-translate",
+  "version": "1.0.0",
+  "description": "PDFMathTranslate - 保留公式排版的学术 PDF 翻译工具",
+  "main": "main.js",
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "build:css": "tailwindcss -i ./src/styles/input.css -o ./src/styles/output.css --minify",
+    "watch:css": "tailwindcss -i ./src/styles/input.css -o ./src/styles/output.css --watch",
+    "dev": "npm run build:css && env -u ELECTRON_RUN_AS_NODE electron .",
+    "pack": "npm run build:css && electron-builder --mac",
+    "dist": "npm run build:css && electron-builder --mac --publish never"
+  },
+  "build": {
+    "appId": "com.pdfmathtranslate.app",
+    "productName": "PDF Math Translate",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "PDF Math Translate",
+      "backgroundColor": "#0a0c16",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "extraResources": []
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "tailwindcss": "^3.4.0"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  }
+}

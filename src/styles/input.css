@@ -1,0 +1,267 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============ Keyframes ============ */
+@keyframes progress-scan {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+@keyframes float-particle {
+  0%, 100% { transform: translateY(0) scale(1); opacity: 0.3; }
+  50% { transform: translateY(-8px) scale(1.1); opacity: 0.6; }
+}
+
+@keyframes drop-zone-pulse {
+  0%, 100% { border-color: rgba(108, 92, 231, 0.3); }
+  50% { border-color: rgba(108, 92, 231, 0.7); }
+}
+
+/* ============ Base ============ */
+@layer base {
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(108, 92, 231, 0.15);
+    border-radius: 10px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(108, 92, 231, 0.3);
+  }
+
+  body {
+    -webkit-app-region: drag;
+    user-select: none;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+  }
+
+  input, select, button, textarea, .no-drag, .file-list {
+    -webkit-app-region: no-drag;
+  }
+
+  ::selection {
+    background: rgba(108, 92, 231, 0.3);
+    color: #fff;
+  }
+}
+
+/* ============ Components ============ */
+@layer components {
+  /* --- Glass Panel --- */
+  .glass-panel {
+    @apply bg-surface-800/50 border border-surface-700/40 rounded-2xl;
+    box-shadow:
+      0 2px 16px rgba(0, 0, 0, 0.2),
+      inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(20px) saturate(1.2);
+  }
+
+  /* --- Glass Input --- */
+  .glass-input {
+    @apply bg-surface-850/80 border border-surface-700/50 rounded-xl px-3.5 py-2
+           text-surface-100 placeholder-surface-500 text-sm
+           transition-all duration-200;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+  .glass-input:focus {
+    @apply outline-none border-accent/50;
+    box-shadow:
+      inset 0 1px 3px rgba(0, 0, 0, 0.2),
+      0 0 0 3px rgba(108, 92, 231, 0.12);
+  }
+
+  /* --- Select Styling --- */
+  select.glass-input {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%236b7188'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
+    background-size: 1rem;
+    padding-right: 2rem;
+  }
+
+  /* --- Primary Button --- */
+  .btn-primary {
+    @apply text-white font-semibold rounded-xl px-6 py-2.5
+           transition-all duration-200
+           disabled:opacity-30 disabled:cursor-not-allowed disabled:active:scale-100;
+    background: linear-gradient(135deg, #6c5ce7 0%, #a29bfe 100%);
+    box-shadow:
+      0 2px 12px rgba(108, 92, 231, 0.3),
+      inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    letter-spacing: 0.02em;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, #5541d9 0%, #8c82fc 100%);
+    box-shadow:
+      0 4px 20px rgba(108, 92, 231, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    transform: translateY(-1px);
+  }
+  .btn-primary:active:not(:disabled) {
+    transform: translateY(0) scale(0.98);
+    box-shadow: 0 1px 6px rgba(108, 92, 231, 0.2);
+  }
+
+  /* --- Secondary Button --- */
+  .btn-secondary {
+    @apply text-surface-300 font-medium rounded-xl px-5 py-2.5
+           border border-surface-600/40 transition-all duration-200
+           disabled:opacity-30 disabled:cursor-not-allowed;
+    background: linear-gradient(180deg, rgba(42, 46, 66, 0.8) 0%, rgba(26, 29, 46, 0.8) 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    @apply border-surface-500/60 text-surface-100;
+    background: linear-gradient(180deg, rgba(55, 60, 85, 0.9) 0%, rgba(35, 39, 55, 0.9) 100%);
+  }
+  .btn-secondary:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  /* --- Label --- */
+  .label {
+    @apply text-xs font-medium text-surface-400 mb-1.5 block tracking-wide uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  /* --- File Item --- */
+  .file-item {
+    @apply flex items-center justify-between gap-2 px-3 py-2 rounded-xl
+           border border-surface-700/30 transition-all duration-200;
+    background: linear-gradient(135deg, rgba(26, 29, 46, 0.6) 0%, rgba(42, 46, 66, 0.3) 100%);
+  }
+  .file-item:hover {
+    @apply border-surface-600/50;
+    background: linear-gradient(135deg, rgba(42, 46, 66, 0.6) 0%, rgba(55, 60, 85, 0.3) 100%);
+  }
+
+  /* --- Stage Card --- */
+  .stage-card {
+    @apply flex items-center gap-3 px-3.5 py-2.5 rounded-xl border border-surface-700/30;
+    background: linear-gradient(135deg, rgba(108, 92, 231, 0.06) 0%, rgba(26, 29, 46, 0.5) 100%);
+  }
+
+  /* --- Progress Bar --- */
+  .progress-track {
+    @apply w-full h-1.5 rounded-full overflow-hidden;
+    background: rgba(42, 46, 66, 0.6);
+  }
+  .progress-fill {
+    @apply h-full rounded-full transition-all duration-500 ease-out;
+    background: linear-gradient(90deg, #6c5ce7 0%, #a29bfe 50%, #81ecec 100%);
+    background-size: 200% 100%;
+    animation: progressGlow 2s ease-in-out infinite;
+  }
+
+  @keyframes progressGlow {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+  }
+
+  /* --- Indeterminate progress --- */
+  .progress-indeterminate {
+    position: relative;
+    width: 100% !important;
+    opacity: 0.6;
+    transition: none !important;
+  }
+  .progress-indeterminate::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    width: 35%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+    border-radius: inherit;
+    animation: progress-scan 1.8s ease-in-out infinite;
+  }
+
+  /* --- Text link button --- */
+  .link-btn {
+    @apply text-xs text-surface-500 transition-all duration-200 relative;
+  }
+  .link-btn:hover {
+    @apply text-accent-light;
+  }
+  .link-btn::after {
+    content: '';
+    @apply absolute bottom-0 left-0 w-0 h-px bg-accent-light transition-all duration-200;
+  }
+  .link-btn:hover::after {
+    @apply w-full;
+  }
+
+  /* --- GPU Badge --- */
+  .gpu-badge {
+    @apply items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-lg shrink-0;
+    background: linear-gradient(135deg, rgba(108, 92, 231, 0.2) 0%, rgba(0, 206, 201, 0.15) 100%);
+    color: #81ecec;
+    border: 1px solid rgba(0, 206, 201, 0.2);
+  }
+
+  /* --- Drop zone active --- */
+  .drop-active {
+    animation: drop-zone-pulse 1s ease-in-out infinite;
+    background: rgba(108, 92, 231, 0.05) !important;
+  }
+
+  /* --- Section title --- */
+  .section-title {
+    @apply text-sm font-semibold text-surface-200 flex items-center gap-2;
+  }
+  .section-title::before {
+    content: '';
+    @apply w-1 h-4 rounded-full;
+    background: linear-gradient(180deg, #6c5ce7 0%, #a29bfe 100%);
+  }
+
+  /* --- Divider --- */
+  .divider {
+    @apply border-t border-surface-700/30;
+  }
+
+  /* --- Checkbox custom --- */
+  input[type="checkbox"] {
+    @apply w-3.5 h-3.5 rounded cursor-pointer;
+    accent-color: #6c5ce7;
+  }
+
+  /* --- Log container --- */
+  .log-area {
+    @apply text-xs font-mono leading-relaxed whitespace-pre-wrap break-all;
+    color: #8d93a8;
+  }
+  .log-area::selection {
+    background: rgba(108, 92, 231, 0.3);
+  }
+}
+
+/* ============ Utilities ============ */
+@layer utilities {
+  .text-gradient {
+    background: linear-gradient(135deg, #a29bfe 0%, #81ecec 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .bg-noise {
+    position: relative;
+  }
+  .bg-noise::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    opacity: 0.015;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 0;
+  }
+}
